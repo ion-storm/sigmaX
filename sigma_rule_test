@@ -1,0 +1,41 @@
+title: Suspicious Child Process Of AppVLP.EXE with Elevated Privileges
+id: 9c7e131a-0f2c-4ae0-9d43-b04f4e266d44
+status: test
+description: |
+  Detects suspicious child processes of AppVLP.EXE running with a high integrity level.
+  While AppVLP is normally used for application virtualization, attackers might abuse it to spawn processes
+  with elevated privileges for malicious activities.
+references:
+  - https://example.com/suspicious-appvlp
+author: Sreeman & ionstorm
+date: 2020-04-01
+modified: 2023-11-09
+tags:
+  - attack.t1218
+  - attack.defense-evasion
+  - attack.execution
+logsource:
+  category: process_creation
+  product: windows
+detection:
+  selection:
+    ParentImage|endswith: '\appvlp.exe'
+    IntegrityLevel: "High"
+  filter_exclusion:
+    Image|endswith:
+      - ':\Windows\System32\trustedprocess.exe'
+  condition: selection and not 1 of filter_exclusion
+test_log: |
+  {
+    "EventID": "1",
+    "UtcTime": "2023-11-09T15:00:00.000Z",
+    "Image": "C:\\Windows\\System32\\suspiciouschild.exe",
+    "ParentImage": "C:\\Program Files\\AppVLP\\appvlp.exe",
+    "CommandLine": "suspiciouschild.exe -run",
+    "IntegrityLevel": "High",
+    "ProcessGuid": "{87654321-4321-4321-4321-0987654321ba}",
+    "ProcessId": "9876"
+  }
+falsepositives:
+  - Legitimate high integrity processes occasionally spawned by AppVLP.
+level: high

@@ -109,9 +109,9 @@ siems:
       firewall: "events.firewall_table"
       default: "events.default_table"
     operators:
-      contains: "{field} LIKE '%{value}%'"
-      startswith: "{field} LIKE '{value}%'"
-      endswith: "{field} LIKE '%{value}'"
+      contains: "LOWER({field}) LIKE '%{value}%'"
+      startswith: "LOWER({field}) LIKE '{value}%'"
+      endswith: "LOWER({field}) LIKE '%{value}'"
       re: "{field} REGEXP '{value}'"
       equals: "{field} = '{value}'"
       exists: "{field} IS NOT NULL"

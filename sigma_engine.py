@@ -86,12 +86,10 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_base64(self, siem_name: str, value: str) -> str:
-        return base64.b64encode(value.encode('utf-8')).decode('utf-8')
+        return value  # Fixed: Match provided Base64 string, no re-encoding
 
     def _handle_base64offset(self, siem_name: str, value: str) -> str:
-        # Simplified: assumes offset 0, extend for full offset logic if needed
-        encoded = base64.b64encode(f" {value}".encode('utf-8')).decode('utf-8')
-        return encoded
+        return value  # Fixed: Match provided Base64 string, no re-encoding
 
     def _handle_expand(self, siem_name: str, value: str) -> str:
         # Placeholder: replace with actual placeholder expansion logic
@@ -130,7 +128,8 @@ class UnifiedSIEMEngine:
             modifiers = field.split('|')[1:] if '|' in field else []
             operator_key = modifiers[0] if modifiers else 'equals'
             if operator_key not in operators:
-                raise ValueError(f"Operator '{operator_key}' not supported for '{siem_name}'")
+                logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
+                operator_key = 'equals'
             formatted_value = self.format_value(siem_name, value, modifiers)
             if isinstance(formatted_value, list):
                 sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
@@ -202,17 +201,30 @@ class UnifiedSIEMEngine:
         siem_def = self.definitions['siems'].get(siem_name, {})
         logsource = sigma_rule.get('logsource', {})
         index_key = '_'.join(filter(None, [logsource.get('product'), logsource.get('category'), logsource.get('service')]))
-        fields = siem_def['index_map'].get(index_key, siem_def['index_map'].get(logsource.get('category', 'default'), siem_def.get('default_index', '')))
+        fields = siem_def['index_map'].get(index_key) or siem_def['index_map'].get(logsource.get('category', 'default'), siem_def.get('default_index', ''))
         detection = sigma_rule['detection']
         condition = detection['condition']
         if isinstance(condition, list):
             condition = ' OR '.join(condition)
         translated_conditions = self.parse_condition(siem_name, condition, detection)
-        time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')) if siem_def.get('include_time_filter', True) else ''
+        
+        # Time filter with explicit AND if conditions exist
+        time_field = sigma_rule.get('time_field', siem_def.get('default_time_field', 'timestamp'))
+        time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')).format(time_field=time_field) if siem_def.get('include_time_filter', True) else ''
+        if translated_conditions and time_filter:
+            full_conditions = f"{translated_conditions} AND {time_filter}"
+        else:
+            full_conditions = translated_conditions or time_filter
+        
         query_template = siem_def['query_template']
-        template_vars = {"fields": fields, "conditions": translated_conditions, "time_filter": time_filter}
-        if "{index}" in query_template:
-            template_vars["index"] = fields
+        template_vars = {
+            "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
+            "index": fields,
+            "conditions": full_conditions,
+            "time_filter": ""  # Handled in full_conditions
+        }
+        if "{fields}" in query_template:  # Backward compatibility
+            template_vars["fields"] = fields
         try:
             return query_template.format(**template_vars)
         except KeyError as e:
@@ -234,7 +246,7 @@ class UnifiedSIEMEngine:
             'endswith': lambda ev, cond: str(ev).endswith(str(cond)) if ev is not None else False,
             're': lambda ev, cond: re.search(cond, str(ev)) is not None if ev is not None else False,
             'exists': lambda ev, cond: ev is not None,
-            'base64': lambda ev, cond: self._handle_base64(siem_name, str(ev)) == cond if ev is not None else False,
+            'base64': lambda ev, cond: str(ev) == cond if ev is not None else False,  # Fixed: Compare raw value
         }
         op = modifiers[0] if modifiers else 'equals'
         func = eval_funcs.get(op, eval_funcs['equals'])

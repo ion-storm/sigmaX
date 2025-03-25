@@ -1,6 +1,7 @@
 siems:
   splunk:
     name: "Splunk SPL & tstats data model queries"
+    include_time_filter: false
     index_map:
       process_creation: "index=windows_events"
       firewall: "index=firewall"
@@ -70,6 +71,7 @@ siems:
 
   elasticsearch:
     name: "Kibana Query Language"
+    include_time_filter: false
     index_map:
       process_creation: "index=winlogbeat-*"
       firewall: "index=packetbeat-*"
@@ -101,6 +103,7 @@ siems:
 
   trino:
     name: "Trino SQL Query Engine"
+    include_time_filter: false
     index_map:
       process_creation: "events.process_creation_table"
       firewall: "events.firewall_table"

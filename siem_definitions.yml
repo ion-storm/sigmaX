@@ -1,7 +1,6 @@
 siems:
   splunk:
     name: "Splunk SPL & tstats data model queries"
-    include_time_filter: false
     index_map:
       process_creation: "index=windows_events"
       firewall: "index=firewall"
@@ -27,9 +26,9 @@ siems:
     query_template: "{index} {conditions} {time_filter}"
     value_format: "always_quote"
     escape_chars:
-      "\\" : "\\\\"
-      "/" : "\\/"  
-      '"' : "\\\""
+      "\\": "\\\\"
+      "/": "\\/"
+      '"': "\\\""
 
   crowdstrike:
     name: "CrowdStrike LogScale Query Language"
@@ -53,16 +52,17 @@ siems:
       keyword: "@timestamp>="
       format:
         last_24_hours: "now()-24h"
-        last_7_days: "now()-7d"
-        last_30_days: "now()-30d"
+        last_7_days: "now-7d"
+        last_30_days: "now-30d"
         default: "now()-24h"
     query_template: "{index} {conditions} {time_filter}"
     value_format: "default"
+    windash_strategy: "regex"
     escape_chars:
-      "\\" : "\\\\"
-      "/" : "\\/"
-      '"' : "\\\""
-      ' ' : "\\s"
+      "\\": "\\\\"
+      "/": "\\/"
+      '"': "\\\""
+      ' ': "\\s"
     field_mappings:
       CommandLine: "cmdline"
       Image: "image"
@@ -97,9 +97,9 @@ siems:
     query_template: "{index} {conditions} {time_filter}"
     value_format: "default"
     escape_chars:
-      "\\" : "\\\\"
-      "/" : "\\/"  
-      '"' : "\\\""
+      "\\": "\\\\"
+      "/": "\\/"
+      '"': "\\\""
 
   trino:
     name: "Trino SQL Query Engine"
@@ -109,30 +109,47 @@ siems:
       firewall: "events.firewall_table"
       default: "events.default_table"
     operators:
-      contains: "LOWER({field}) LIKE '%{value}%'"
-      startswith: "LOWER({field}) LIKE '{value}%'"
-      endswith: "LOWER({field}) LIKE '%{value}'"
-      re: "{field} REGEXP '{value}'"
       equals: "{field} = '{value}'"
+      contains: "REGEXP_LIKE({field}, '(?i){value}'"
+      startswith: "{field} LIKE '{value}%'"
+      endswith: "{field} LIKE '%{value}'"
+      re: "REGEXP_LIKE({field}, '{value}')"
       exists: "{field} IS NOT NULL"
+      base64: "{field} = '{value}'"
+      base64offset: "{field} = '{value}'"
+      windash: "{windash_template}"  # New operator for windash
     group_conditions:
       all_of: "({conditions})"
       any_of: "({conditions})"
       not: "NOT ({conditions})"
     time_filter:
-      keyword: "timestamp >= "
+      keyword: "{time_field} >= "
       format:
         last_24_hours: "CURRENT_TIMESTAMP - INTERVAL '24' HOUR"
         last_7_days: "CURRENT_TIMESTAMP - INTERVAL '7' DAY"
         last_30_days: "CURRENT_TIMESTAMP - INTERVAL '30' DAY"
         default: "CURRENT_TIMESTAMP - INTERVAL '24' HOUR"
-    query_template: "SELECT *  FROM {index} WHERE {conditions} {time_filter};"
+    query_template: |
+      SELECT *
+      FROM {index}
+      WHERE {conditions};
+    default_time_field: "timestamp"
+    default_columns: "*"
     value_format: "default"
+    #windash_strategy: "regex"  # Can be changed to "like"
+    windash_templates:  # New section for windash strategies
+      regex: "REGEXP_LIKE({field}, '{value}')"
+      like: "({conditions})"
     escape_chars:
-      "\\" : "\\\\"
-      "'"  : "''"
+      "\\": "\\\\"
+      "'": "''"
+      "%": "\\%"
+      "_": "\\_"
+      ' ': "\\s"
     field_mappings:
       CommandLine: "cmdline"
       Image: "image"
       ParentImage: "parent_image"
       OriginalFileName: "orig_file"
+      Details: "details"
+      IntegrityLevel: "integrity_level"

@@ -21,6 +21,21 @@ class UnifiedSIEMEngine:
             "base64": self._handle_base64,
             "base64offset": self._handle_base64offset,
             "expand": self._handle_expand,
+            "windash": self._handle_windash,
+            "cased": self._handle_cased,
+            "lt": self._handle_lt, "lte": self._handle_lte,
+            "gt": self._handle_gt, "gte": self._handle_gte,
+            "minute": self._handle_time, "hour": self._handle_time,
+            "day": self._handle_time, "week": self._handle_time,
+            "month": self._handle_time, "year": self._handle_time,
+            "cidr": self._handle_cidr,
+            "fieldref": self._handle_fieldref,
+        }
+        self.encoding_handlers = {
+            "utf16le": lambda v: v.encode('utf-16le'),
+            "utf16be": lambda v: v.encode('utf-16be'),
+            "utf16": lambda v: b'\xFF\xFE' + v.encode('utf-16le'),
+            "wide": lambda v: v.encode('utf-16le'),
         }
 
     def load_yaml_file(self, path: str) -> dict:
@@ -53,11 +68,16 @@ class UnifiedSIEMEngine:
         if value == 'null':
             return 'null'
         if modifiers:
-            for modifier in modifiers:
-                if modifier in self.modifier_handlers:
-                    value = self.modifier_handlers[modifier](siem_name, value)
-                elif modifier != 'all':  # Skip 'all' here, handle in _translate_dict
-                    logging.warning(f"Unsupported modifier '{modifier}' for {siem_name}")
+            encoding = None
+            for mod in modifiers:
+                if mod in self.encoding_handlers:
+                    encoding = mod
+                elif mod in self.modifier_handlers and mod != 'all':
+                    value = self.modifier_handlers[mod](siem_name, value, modifiers)
+                elif mod not in {'all', 'i', 'm', 's'}:
+                    logging.warning(f"Unsupported modifier '{mod}' for {siem_name}")
+            if encoding:
+                value = base64.b64encode(self.encoding_handlers[encoding](value)).decode('ascii')
         siem_def = self.definitions['siems'][siem_name]
         formatting_rule = siem_def.get('value_format', 'default')
         if formatting_rule == 'quote_if_space' and ' ' in value:
@@ -67,34 +87,62 @@ class UnifiedSIEMEngine:
         return value
 
     # Modifier Handlers
-    def _handle_contains(self, siem_name: str, value: str) -> str:
+    def _handle_contains(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_startswith(self, siem_name: str, value: str) -> str:
+    def _handle_startswith(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_endswith(self, siem_name: str, value: str) -> str:
+    def _handle_endswith(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_regex(self, siem_name: str, value: str) -> str:
+    def _handle_regex(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_equals(self, siem_name: str, value: str) -> str:
+    def _handle_equals(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_exists(self, siem_name: str, value: str) -> str:
+    def _handle_exists(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value.lower() in ('true', '1')
+
+    def _handle_base64(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_base64(self, siem_name: str, value: str) -> str:
+    def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_base64offset(self, siem_name: str, value: str) -> str:
-        return value
-
-    def _handle_expand(self, siem_name: str, value: str) -> str:
+    def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         if value.startswith('%') and value.endswith('%'):
             logging.warning(f"Placeholder '{value}' not expanded (implement expansion logic)")
         return value
+
+    def _handle_windash(self, siem_name: str, value: str, mods: List[str]) -> str:
+        dashes = ['-', '/', '–', '—', '―']
+        return '|'.join(value.replace('-', d) for d in dashes)
+
+    def _handle_cased(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_lt(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_lte(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_gt(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_gte(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_time(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_cidr(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_fieldref(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return self.map_field(siem_name, value)
 
     def translate_search(self, siem_name: str, search_id: str, search: Union[dict, list]) -> str:
         siem_def = self.definitions['siems'].get(siem_name, {})
@@ -120,23 +168,38 @@ class UnifiedSIEMEngine:
     def _translate_dict(self, siem_name: str, search: dict) -> List[str]:
         siem_def = self.definitions['siems'][siem_name]
         operators = siem_def['operators']
+        windash_strategy = siem_def.get('windash_strategy', 'regex')
+        windash_templates = siem_def.get('windash_templates', {'regex': "REGEXP_LIKE({field}, '{value}')", 'like': "({conditions})"})
+        logging.debug(f"Using windash_strategy '{windash_strategy}' for {siem_name}")
         conditions = []
         for field, value in search.items():
             base_field = field.split('|')[0]
             mapped_field = self.map_field(siem_name, base_field)
             modifiers = field.split('|')[1:] if '|' in field else []
             operator_key = modifiers[0] if modifiers else 'equals'
-            if operator_key not in operators:
-                logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
-                operator_key = 'equals'
             formatted_value = self.format_value(siem_name, value, modifiers)
-            if isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
-                # Handle '|modifier|all' by applying the modifier to all values with AND
+            logging.debug(f"Field: {mapped_field}, Operator: {operator_key}, Value: {formatted_value}")
+            if operator_key == 'windash' and 'windash' in operators:
+                windash_values = formatted_value.split('|')
+                if windash_strategy == 'regex':
+                    condition = windash_templates['regex'].format(field=mapped_field, value=formatted_value)
+                elif windash_strategy == 'like':
+                    sub_conditions = [operators['contains'].format(field=mapped_field, value=v) for v in windash_values]
+                    condition = windash_templates['like'].format(conditions=' OR '.join(sub_conditions))
+                else:
+                    logging.warning(f"Unknown windash_strategy '{windash_strategy}' for {siem_name}, defaulting to regex")
+                    condition = windash_templates['regex'].format(field=mapped_field, value=formatted_value)
+            elif operator_key not in operators:
+                logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
+                condition = operators['equals'].format(field=mapped_field, value=formatted_value)
+            elif isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
                 sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
                 condition = siem_def['group_conditions']['all_of'].format(conditions=' AND '.join(sub_conditions))
             elif isinstance(formatted_value, list):
                 sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
                 condition = siem_def['group_conditions']['any_of'].format(conditions=' OR '.join(sub_conditions))
+            elif operator_key in {'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'}:
+                condition = operators.get(operator_key, operators['equals']).format(field=mapped_field, value=formatted_value)
             else:
                 condition = operators[operator_key].format(field=mapped_field, value=formatted_value)
             conditions.append(condition)
@@ -207,14 +270,12 @@ class UnifiedSIEMEngine:
         if isinstance(condition, list):
             condition = ' OR '.join(condition)
         translated_conditions = self.parse_condition(siem_name, condition, detection)
-        
         time_field = sigma_rule.get('time_field', siem_def.get('default_time_field', 'timestamp'))
         time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')).format(time_field=time_field) if siem_def.get('include_time_filter', True) else ''
         if translated_conditions and time_filter:
             full_conditions = f"{translated_conditions} AND {time_filter}"
         else:
             full_conditions = translated_conditions or time_filter
-        
         query_template = siem_def['query_template']
         template_vars = {
             "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
@@ -238,21 +299,34 @@ class UnifiedSIEMEngine:
         mapped_field = self.map_field(siem_name, field)
         event_value = event.get(mapped_field, event.get(field))
         eval_funcs = {
-            'equals': lambda ev, cond: str(ev) == str(cond) if ev is not None else False,
-            'contains': lambda ev, cond: str(cond) in str(ev) if ev is not None else False,
-            'startswith': lambda ev, cond: str(ev).startswith(str(cond)) if ev is not None else False,
-            'endswith': lambda ev, cond: str(ev).endswith(str(cond)) if ev is not None else False,
-            're': lambda ev, cond: re.search(cond, str(ev)) is not None if ev is not None else False,
-            'exists': lambda ev, cond: ev is not None,
-            'base64': lambda ev, cond: str(ev) == cond if ev is not None else False,
+            'equals': lambda ev, cv: str(ev) == str(cv) if ev is not None else False,
+            'contains': lambda ev, cv: str(cv) in str(ev) if ev is not None else False,
+            'startswith': lambda ev, cv: str(ev).startswith(str(cv)) if ev is not None else False,
+            'endswith': lambda ev, cv: str(ev).endswith(str(cv)) if ev is not None else False,
+            're': lambda ev, cv: bool(re.search(cv, str(ev), re.I if 'i' in modifiers else 0)) if ev is not None else False,
+            'exists': lambda ev, cv: (ev is not None) == (str(cv).lower() in ('true', '1')),
+            'base64': lambda ev, cv: str(ev) == cv if ev is not None else False,
+            'windash': lambda ev, cv: any(re.search(re.escape(v), str(ev)) for v in cv.split('|')) if ev is not None else False,
+            'lt': lambda ev, cv: float(ev) < float(cv) if ev is not None else False,
+            'lte': lambda ev, cv: float(ev) <= float(cv) if ev is not None else False,
+            'gt': lambda ev, cv: float(ev) > float(cv) if ev is not None else False,
+            'gte': lambda ev, cv: float(ev) >= float(cv) if ev is not None else False,
+            'minute': lambda ev, cv: int(ev.split(':')[1]) == int(cv) if ev else False,
+            'hour': lambda ev, cv: int(ev.split(':')[0]) == int(cv) if ev else False,
+            'day': lambda ev, cv: int(ev.split('-')[2]) == int(cv) if ev else False,
+            'month': lambda ev, cv: int(ev.split('-')[1]) == int(cv) if ev else False,
+            'year': lambda ev, cv: int(ev.split('-')[0]) == int(cv) if ev else False,
+            'cidr': lambda ev, cv: ev.startswith(cv.split('/')[0]) if ev else False,
+            'fieldref': lambda ev, cv: str(ev) == str(event.get(cv)) if ev is not None else False,
         }
         op = modifiers[0] if modifiers else 'equals'
         func = eval_funcs.get(op, eval_funcs['equals'])
-        if isinstance(condition_value, list) and 'all' in [m.lower() for m in modifiers]:
-            return all(func(event_value, val) for val in condition_value)
-        elif isinstance(condition_value, list):
-            return any(func(event_value, val) for val in condition_value)
-        return func(event_value, condition_value)
+        formatted_value = self.format_value(siem_name, condition_value, modifiers)
+        if isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
+            return all(func(event_value, val) for val in formatted_value)
+        elif isinstance(formatted_value, list):
+            return any(func(event_value, val) for val in formatted_value)
+        return func(event_value, formatted_value)
 
     def evaluate_search_identifier(self, siem_name: str, search: Union[dict, list, str], event: dict) -> bool:
         if isinstance(search, dict):

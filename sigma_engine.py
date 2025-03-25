@@ -20,7 +20,7 @@ class UnifiedSIEMEngine:
             "exists": self._handle_exists,
             "base64": self._handle_base64,
             "base64offset": self._handle_base64offset,
-            "expand": self._handle_expand,  # Placeholder for future implementation
+            "expand": self._handle_expand,
         }
 
     def load_yaml_file(self, path: str) -> dict:
@@ -49,14 +49,14 @@ class UnifiedSIEMEngine:
     def format_value(self, siem_name: str, value: Union[str, List[str]], modifiers: List[str] = None) -> Union[str, List[str]]:
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
-        value = self.escape_value(siem_name, str(value))  # Ensure string
+        value = self.escape_value(siem_name, str(value))
         if value == 'null':
             return 'null'
         if modifiers:
-            for modifier in modifiers:  # Apply modifiers in order
+            for modifier in modifiers:
                 if modifier in self.modifier_handlers:
                     value = self.modifier_handlers[modifier](siem_name, value)
-                else:
+                elif modifier != 'all':  # Skip 'all' here, handle in _translate_dict
                     logging.warning(f"Unsupported modifier '{modifier}' for {siem_name}")
         siem_def = self.definitions['siems'][siem_name]
         formatting_rule = siem_def.get('value_format', 'default')
@@ -86,13 +86,12 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_base64(self, siem_name: str, value: str) -> str:
-        return value  # Fixed: Match provided Base64 string, no re-encoding
+        return value
 
     def _handle_base64offset(self, siem_name: str, value: str) -> str:
-        return value  # Fixed: Match provided Base64 string, no re-encoding
+        return value
 
     def _handle_expand(self, siem_name: str, value: str) -> str:
-        # Placeholder: replace with actual placeholder expansion logic
         if value.startswith('%') and value.endswith('%'):
             logging.warning(f"Placeholder '{value}' not expanded (implement expansion logic)")
         return value
@@ -131,12 +130,13 @@ class UnifiedSIEMEngine:
                 logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
                 operator_key = 'equals'
             formatted_value = self.format_value(siem_name, value, modifiers)
-            if isinstance(formatted_value, list):
+            if isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
+                # Handle '|modifier|all' by applying the modifier to all values with AND
                 sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
-                joiner = siem_def.get('joiner_any_of', ' OR ')
-                if len(modifiers) > 1 and 'all' in [m.lower() for m in modifiers[1:]]:
-                    joiner = siem_def.get('joiner_all_of', ' AND ')
-                condition = siem_def['group_conditions']['any_of'].format(conditions=joiner.join(sub_conditions))
+                condition = siem_def['group_conditions']['all_of'].format(conditions=' AND '.join(sub_conditions))
+            elif isinstance(formatted_value, list):
+                sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
+                condition = siem_def['group_conditions']['any_of'].format(conditions=' OR '.join(sub_conditions))
             else:
                 condition = operators[operator_key].format(field=mapped_field, value=formatted_value)
             conditions.append(condition)
@@ -177,7 +177,7 @@ class UnifiedSIEMEngine:
                 expr_parts.append(self.translate_search(siem_name, token, detection[token]))
                 i += 1
             else:
-                expr_parts.append(tokens[i])  # Preserve unmatched tokens
+                expr_parts.append(tokens[i])
                 i += 1
         result = " ".join(expr_parts) if not is_elastic else f'"must": [{"".join(expr_parts)}]'
         return result, i
@@ -208,7 +208,6 @@ class UnifiedSIEMEngine:
             condition = ' OR '.join(condition)
         translated_conditions = self.parse_condition(siem_name, condition, detection)
         
-        # Time filter with explicit AND if conditions exist
         time_field = sigma_rule.get('time_field', siem_def.get('default_time_field', 'timestamp'))
         time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')).format(time_field=time_field) if siem_def.get('include_time_filter', True) else ''
         if translated_conditions and time_filter:
@@ -221,9 +220,9 @@ class UnifiedSIEMEngine:
             "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
             "index": fields,
             "conditions": full_conditions,
-            "time_filter": ""  # Handled in full_conditions
+            "time_filter": ""
         }
-        if "{fields}" in query_template:  # Backward compatibility
+        if "{fields}" in query_template:
             template_vars["fields"] = fields
         try:
             return query_template.format(**template_vars)
@@ -235,7 +234,6 @@ class UnifiedSIEMEngine:
         sigma_rule = self.load_yaml_file(sigma_rule_file)
         return self.generate_query(siem_name, sigma_rule)
 
-    # Evaluation Functions
     def evaluate_field_condition(self, siem_name: str, field: str, condition_value: Union[str, List[str]], modifiers: List[str], event: dict) -> bool:
         mapped_field = self.map_field(siem_name, field)
         event_value = event.get(mapped_field, event.get(field))
@@ -246,11 +244,13 @@ class UnifiedSIEMEngine:
             'endswith': lambda ev, cond: str(ev).endswith(str(cond)) if ev is not None else False,
             're': lambda ev, cond: re.search(cond, str(ev)) is not None if ev is not None else False,
             'exists': lambda ev, cond: ev is not None,
-            'base64': lambda ev, cond: str(ev) == cond if ev is not None else False,  # Fixed: Compare raw value
+            'base64': lambda ev, cond: str(ev) == cond if ev is not None else False,
         }
         op = modifiers[0] if modifiers else 'equals'
         func = eval_funcs.get(op, eval_funcs['equals'])
-        if isinstance(condition_value, list):
+        if isinstance(condition_value, list) and 'all' in [m.lower() for m in modifiers]:
+            return all(func(event_value, val) for val in condition_value)
+        elif isinstance(condition_value, list):
             return any(func(event_value, val) for val in condition_value)
         return func(event_value, condition_value)
 
@@ -316,7 +316,7 @@ if __name__ == "__main__":
                         engine.test_rule(args.siem, sigma_rule)
                     else:
                         query = engine.generate_query_from_file(args.siem, full_path)
-                        print(query)  # Just the query
+                        print(query)
                 except Exception as e:
                     print(f"Error processing {rule_file}: {e}")
     elif os.path.isfile(args.path) and args.path.endswith('.yml'):
@@ -326,7 +326,7 @@ if __name__ == "__main__":
                 engine.test_rule(args.siem, sigma_rule)
             else:
                 query = engine.generate_query_from_file(args.siem, args.path)
-                print(query)  # Just the query
+                print(query)
         except Exception as e:
             print(f"Error processing {args.path}: {e}")
     else:

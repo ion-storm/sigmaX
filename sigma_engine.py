@@ -94,7 +94,7 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_endswith(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        return value.strip('\\')  # Remove leading backslash for comparison
 
     def _handle_regex(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
@@ -298,11 +298,13 @@ class UnifiedSIEMEngine:
     def evaluate_field_condition(self, siem_name: str, field: str, condition_value: Union[str, List[str]], modifiers: List[str], event: dict) -> bool:
         mapped_field = self.map_field(siem_name, field)
         event_value = event.get(mapped_field, event.get(field))
+        formatted_value = self.format_value(siem_name, condition_value, modifiers)
+        
         eval_funcs = {
             'equals': lambda ev, cv: str(ev) == str(cv) if ev is not None else False,
             'contains': lambda ev, cv: str(cv) in str(ev) if ev is not None else False,
             'startswith': lambda ev, cv: str(ev).startswith(str(cv)) if ev is not None else False,
-            'endswith': lambda ev, cv: str(ev).endswith(str(cv)) if ev is not None else False,
+            'endswith': lambda ev, cv: str(ev).replace('\\', '/').lower().endswith(str(cv).replace('\\', '/').lower().strip('/')) if ev is not None else False,
             're': lambda ev, cv: bool(re.search(cv, str(ev), re.I if 'i' in modifiers else 0)) if ev is not None else False,
             'exists': lambda ev, cv: (ev is not None) == (str(cv).lower() in ('true', '1')),
             'base64': lambda ev, cv: str(ev) == cv if ev is not None else False,
@@ -321,7 +323,7 @@ class UnifiedSIEMEngine:
         }
         op = modifiers[0] if modifiers else 'equals'
         func = eval_funcs.get(op, eval_funcs['equals'])
-        formatted_value = self.format_value(siem_name, condition_value, modifiers)
+        
         if isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
             return all(func(event_value, val) for val in formatted_value)
         elif isinstance(formatted_value, list):
@@ -339,15 +341,55 @@ class UnifiedSIEMEngine:
         return False
 
     def evaluate_detection(self, siem_name: str, detection: dict, event: dict) -> bool:
-        search_results = {key: self.evaluate_search_identifier(siem_name, cond, event) for key, cond in detection.items() if key != "condition"}
+        search_results = {key: self.evaluate_search_identifier(siem_name, cond, event) 
+                         for key, cond in detection.items() if key != "condition"}
         condition_str = detection.get("condition", "")
-        for key, val in search_results.items():
-            condition_str = re.sub(r'\b' + re.escape(key) + r'\b', str(val), condition_str)
-        condition_str = re.sub(r'(1|all|none)\s+of\s+', '', condition_str)
+        
+        tokens = condition_str.split()
+        eval_str = []
+        i = 0
+        while i < len(tokens):
+            token = tokens[i].lower()
+            if token == 'not' and i + 1 < len(tokens):
+                i += 1
+                next_token = tokens[i].lower()
+                if next_token in ('1', 'all') and i + 2 < len(tokens) and tokens[i + 1].lower() == 'of':
+                    i += 2
+                    pattern = tokens[i] if i < len(tokens) else '*'
+                    matches = [k for k in search_results if re.match(pattern.replace('*', '.*'), k)]
+                    if next_token == '1':
+                        result = not any(search_results[k] for k in matches)
+                    else:  # 'all'
+                        result = not all(search_results[k] for k in matches)
+                    eval_str.append(str(result))
+                elif next_token in search_results:
+                    eval_str.append(str(not search_results[next_token]))
+                else:
+                    eval_str.extend(['not', next_token])
+                i += 1
+            elif token in ('1', 'all') and i + 1 < len(tokens) and tokens[i + 1].lower() == 'of':
+                op, i = tokens[i], i + 2
+                pattern = tokens[i] if i < len(tokens) else '*'
+                matches = [k for k in search_results if re.match(pattern.replace('*', '.*'), k)]
+                if op == '1':
+                    result = any(search_results[k] for k in matches)
+                else:  # 'all'
+                    result = all(search_results[k] for k in matches)
+                eval_str.append(str(result))
+                i += 1
+            elif token in search_results:
+                eval_str.append(str(search_results[token]))
+                i += 1
+            else:
+                eval_str.append(token)
+                i += 1
+        
+        final_condition = ' '.join(eval_str)
         try:
-            return eval(condition_str, {"__builtins__": {}}, {"True": True, "False": False})
+            return eval(final_condition, {"__builtins__": {}}, {"True": True, "False": False, "and": lambda x, y: x and y, 
+                                                               "or": lambda x, y: x or y, "not": lambda x: not x})
         except Exception as e:
-            logging.error(f"Error evaluating condition '{condition_str}': {e}")
+            logging.error(f"Error evaluating condition '{final_condition}': {e}")
             return False
 
     def test_rule(self, siem_name: str, sigma_rule: dict) -> None:
@@ -355,18 +397,40 @@ class UnifiedSIEMEngine:
         if not test_log:
             print("No test_log provided in the rule.")
             return
+            
         print("=== Testing Rule ===")
+        print("Rule Title:", sigma_rule.get('title', 'Untitled'))
         print("Raw Test Log:", test_log)
+        
         try:
             event = yaml.safe_load(test_log)
             if not isinstance(event, dict):
-                raise ValueError("test_log must be a JSON object")
+                raise ValueError("test_log must be a JSON/YAML object")
         except Exception as e:
             print(f"Error parsing test_log: {e}")
             return
+            
         print("\nParsed Event:", event)
-        result = self.evaluate_detection(siem_name, sigma_rule.get('detection', {}), event)
-        print("\nTest Result:", "PASSED" if result else "FAILED")
+        detection = sigma_rule.get('detection', {})
+        print("\nDetection Conditions:", detection)
+        
+        search_results = {}
+        for key, condition in detection.items():
+            if key != 'condition':
+                result = self.evaluate_search_identifier(siem_name, condition, event)
+                search_results[key] = result
+                print(f"\nEvaluating '{key}': {result}")
+                if isinstance(condition, dict):
+                    for field, value in condition.items():
+                        modifiers = field.split('|')[1:] if '|' in field else []
+                        field_name = field.split('|')[0]
+                        eval_result = self.evaluate_field_condition(siem_name, field_name, value, modifiers, event)
+                        print(f"  {field}: {eval_result} (Expected: {value}, Got: {event.get(field_name)})")
+        
+        final_result = self.evaluate_detection(siem_name, detection, event)
+        print(f"\nFinal Condition: {detection.get('condition')}")
+        print("Evaluation Results:", search_results)
+        print("\nTest Result:", "PASSED" if final_result else "FAILED")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate SIEM queries from Sigma rules.")

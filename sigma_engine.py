@@ -108,13 +108,13 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_exists(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value.lower() in ('true', '1')
+        return value  # Fixed: Return raw value, not boolean
 
     def _handle_base64(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        return base64.b64encode(value.encode('ascii')).decode('ascii')
 
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        return base64.b64encode(value.encode('ascii')).decode('ascii')  # Fixed: Encode like base64
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         if value.startswith('%') and value.endswith('%'):

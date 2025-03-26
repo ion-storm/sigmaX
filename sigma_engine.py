@@ -69,7 +69,11 @@ class UnifiedSIEMEngine:
     def format_value(self, siem_name: str, value: Union[str, List[str]], modifiers: List[str] = None) -> Union[str, List[str]]:
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
-        value = self.escape_value(siem_name, str(value))
+        # Skip escaping for 'cidr' modifier to preserve raw CIDR notation
+        if modifiers and 'cidr' in modifiers:
+            value = str(value)
+        else:
+            value = self.escape_value(siem_name, str(value))
         if value == 'null':
             return 'null'
         if modifiers:
@@ -114,7 +118,7 @@ class UnifiedSIEMEngine:
         return base64.b64encode(value.encode('ascii')).decode('ascii')
 
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        return base64.b64encode(value.encode('ascii')).decode('ascii')  # Fixed: Encode like base64
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         if value.startswith('%') and value.endswith('%'):

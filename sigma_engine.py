@@ -114,7 +114,7 @@ class UnifiedSIEMEngine:
         return base64.b64encode(value.encode('ascii')).decode('ascii')
 
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return base64.b64encode(value.encode('ascii')).decode('ascii')  # Fixed: Encode like base64
+        return value
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         if value.startswith('%') and value.endswith('%'):

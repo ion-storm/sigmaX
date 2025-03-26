@@ -4,6 +4,8 @@ import logging
 import os
 import argparse
 import base64
+import datetime
+import ipaddress
 from typing import Dict, List, Union, Tuple
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
@@ -25,9 +27,12 @@ class UnifiedSIEMEngine:
             "cased": self._handle_cased,
             "lt": self._handle_lt, "lte": self._handle_lte,
             "gt": self._handle_gt, "gte": self._handle_gte,
-            "minute": self._handle_time, "hour": self._handle_time,
-            "day": self._handle_time, "week": self._handle_time,
-            "month": self._handle_time, "year": self._handle_time,
+            "minute": self._handle_minute,
+            "hour": self._handle_hour,
+            "day": self._handle_day,
+            "week": self._handle_week,
+            "month": self._handle_month,
+            "year": self._handle_year,
             "cidr": self._handle_cidr,
             "fieldref": self._handle_fieldref,
         }
@@ -94,7 +99,7 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_endswith(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value.strip('\\')  # Remove leading backslash for comparison
+        return value.strip('\\')
 
     def _handle_regex(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
@@ -113,7 +118,7 @@ class UnifiedSIEMEngine:
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         if value.startswith('%') and value.endswith('%'):
-            logging.warning(f"Placeholder '{value}' not expanded (implement expansion logic)")
+            logging.warning(f"Placeholder '{value}' not expanded (requires pipeline)")
         return value
 
     def _handle_windash(self, siem_name: str, value: str, mods: List[str]) -> str:
@@ -135,7 +140,22 @@ class UnifiedSIEMEngine:
     def _handle_gte(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
-    def _handle_time(self, siem_name: str, value: str, mods: List[str]) -> str:
+    def _handle_minute(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_hour(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_day(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_week(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_month(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_year(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
     def _handle_cidr(self, siem_name: str, value: str, mods: List[str]) -> str:
@@ -169,8 +189,6 @@ class UnifiedSIEMEngine:
         siem_def = self.definitions['siems'][siem_name]
         operators = siem_def['operators']
         windash_strategy = siem_def.get('windash_strategy', 'regex')
-        windash_templates = siem_def.get('windash_templates', {'regex': "REGEXP_LIKE({field}, '{value}')", 'like': "({conditions})"})
-        logging.debug(f"Using windash_strategy '{windash_strategy}' for {siem_name}")
         conditions = []
         for field, value in search.items():
             base_field = field.split('|')[0]
@@ -178,9 +196,12 @@ class UnifiedSIEMEngine:
             modifiers = field.split('|')[1:] if '|' in field else []
             operator_key = modifiers[0] if modifiers else 'equals'
             formatted_value = self.format_value(siem_name, value, modifiers)
-            logging.debug(f"Field: {mapped_field}, Operator: {operator_key}, Value: {formatted_value}")
             if operator_key == 'windash' and 'windash' in operators:
                 windash_values = formatted_value.split('|')
+                windash_templates = siem_def.get('windash_templates')
+                if not windash_templates:
+                    logging.error(f"SIEM '{siem_name}' supports 'windash' but lacks 'windash_templates' in definitions")
+                    raise ValueError(f"Missing 'windash_templates' for {siem_name}")
                 if windash_strategy == 'regex':
                     condition = windash_templates['regex'].format(field=mapped_field, value=formatted_value)
                 elif windash_strategy == 'like':
@@ -189,9 +210,17 @@ class UnifiedSIEMEngine:
                 else:
                     logging.warning(f"Unknown windash_strategy '{windash_strategy}' for {siem_name}, defaulting to regex")
                     condition = windash_templates['regex'].format(field=mapped_field, value=formatted_value)
+            elif operator_key == 're' and 're' in operators:
+                flags = ''
+                if 'i' not in modifiers: flags += ' CASE_SENSITIVE'
+                if 'm' in modifiers: flags += ' MULTILINE'
+                if 's' in modifiers: flags += ' DOTALL'
+                condition = operators['re'].format(field=mapped_field, value=formatted_value, flags=flags.strip())
             elif operator_key not in operators:
                 logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
                 condition = operators['equals'].format(field=mapped_field, value=formatted_value)
+            elif 'cased' in modifiers and operator_key in {'equals', 'contains', 'startswith', 'endswith'}:
+                condition = operators[operator_key].format(field=mapped_field, value=formatted_value, flags=' CASE_SENSITIVE')
             elif isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
                 sub_conditions = [operators[operator_key].format(field=mapped_field, value=v) for v in formatted_value]
                 condition = siem_def['group_conditions']['all_of'].format(conditions=' AND '.join(sub_conditions))
@@ -273,7 +302,7 @@ class UnifiedSIEMEngine:
         time_field = sigma_rule.get('time_field', siem_def.get('default_time_field', 'timestamp'))
         time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')).format(time_field=time_field) if siem_def.get('include_time_filter', True) else ''
         if translated_conditions and time_filter:
-            full_conditions = f"{translated_conditions} AND {time_filter}"
+            full_conditions = siem_def.get('joiner_all_of', ' AND ').join([translated_conditions, time_filter])
         else:
             full_conditions = translated_conditions or time_filter
         query_template = siem_def['query_template']
@@ -281,7 +310,7 @@ class UnifiedSIEMEngine:
             "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
             "index": fields,
             "conditions": full_conditions,
-            "time_filter": ""
+            "time_filter": time_filter
         }
         if "{fields}" in query_template:
             template_vars["fields"] = fields
@@ -304,8 +333,8 @@ class UnifiedSIEMEngine:
             'equals': lambda ev, cv: str(ev) == str(cv) if ev is not None else False,
             'contains': lambda ev, cv: str(cv) in str(ev) if ev is not None else False,
             'startswith': lambda ev, cv: str(ev).startswith(str(cv)) if ev is not None else False,
-            'endswith': lambda ev, cv: str(ev).replace('\\', '/').lower().endswith(str(cv).replace('\\', '/').lower().strip('/')) if ev is not None else False,
-            're': lambda ev, cv: bool(re.search(cv, str(ev), re.I if 'i' in modifiers else 0)) if ev is not None else False,
+            'endswith': lambda ev, cv: str(ev).replace('\\', '/').endswith(str(cv).replace('\\', '/').strip('/')) if ev is not None else False,
+            're': lambda ev, cv: bool(re.search(cv, str(ev), (re.I if 'i' in modifiers else 0) | (re.M if 'm' in modifiers else 0) | (re.S if 's' in modifiers else 0))) if ev is not None else False,
             'exists': lambda ev, cv: (ev is not None) == (str(cv).lower() in ('true', '1')),
             'base64': lambda ev, cv: str(ev) == cv if ev is not None else False,
             'windash': lambda ev, cv: any(re.search(re.escape(v), str(ev)) for v in cv.split('|')) if ev is not None else False,
@@ -313,16 +342,22 @@ class UnifiedSIEMEngine:
             'lte': lambda ev, cv: float(ev) <= float(cv) if ev is not None else False,
             'gt': lambda ev, cv: float(ev) > float(cv) if ev is not None else False,
             'gte': lambda ev, cv: float(ev) >= float(cv) if ev is not None else False,
-            'minute': lambda ev, cv: int(ev.split(':')[1]) == int(cv) if ev else False,
-            'hour': lambda ev, cv: int(ev.split(':')[0]) == int(cv) if ev else False,
-            'day': lambda ev, cv: int(ev.split('-')[2]) == int(cv) if ev else False,
-            'month': lambda ev, cv: int(ev.split('-')[1]) == int(cv) if ev else False,
-            'year': lambda ev, cv: int(ev.split('-')[0]) == int(cv) if ev else False,
-            'cidr': lambda ev, cv: ev.startswith(cv.split('/')[0]) if ev else False,
+            'minute': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').minute) == int(cv) if ev else False,
+            'hour': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').hour) == int(cv) if ev else False,
+            'day': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').day) == int(cv) if ev else False,
+            'week': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').isocalendar()[1]) == int(cv) if ev else False,
+            'month': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').month) == int(cv) if ev else False,
+            'year': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').year) == int(cv) if ev else False,
+            'cidr': lambda ev, cv: ipaddress.ip_address(ev) in ipaddress.ip_network(cv, strict=False) if ev and cv else False,
             'fieldref': lambda ev, cv: str(ev) == str(event.get(cv)) if ev is not None else False,
         }
         op = modifiers[0] if modifiers else 'equals'
         func = eval_funcs.get(op, eval_funcs['equals'])
+        
+        if 'cased' in modifiers and op in {'equals', 'contains', 'startswith', 'endswith'}:
+            return func(event_value, formatted_value)
+        elif op in {'equals', 'contains', 'startswith', 'endswith'}:
+            return func(str(event_value).lower() if event_value else None, str(formatted_value).lower())
         
         if isinstance(formatted_value, list) and 'all' in [m.lower() for m in modifiers]:
             return all(func(event_value, val) for val in formatted_value)

@@ -325,8 +325,19 @@ class UnifiedSIEMEngine:
             "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
             "index": fields,
             "conditions": full_conditions,
-            "time_filter": time_filter
+            "time_filter": time_filter,
+            # Add metadata fields from the Sigma rule
+            "title": sigma_rule.get('title', ''),
+            "description": sigma_rule.get('description', ''),
+            "id": sigma_rule.get('id', ''),
         }
+        # Include tags (e.g., MITRE ATT&CK) if present
+        if 'tags' in sigma_rule:
+            template_vars['tags'] = ' '.join(sigma_rule['tags']) if isinstance(sigma_rule['tags'], list) else sigma_rule['tags']
+        # Add all top-level Sigma rule fields dynamically
+        for key, value in sigma_rule.items():
+            if key not in ['detection', 'logsource', 'columns', 'time_field', 'time_range', 'test_log'] and key not in template_vars:
+                template_vars[key] = ' '.join(value) if isinstance(value, list) else str(value)
         if "{fields}" in query_template:
             template_vars["fields"] = fields
         try:

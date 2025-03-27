@@ -69,7 +69,6 @@ class UnifiedSIEMEngine:
     def format_value(self, siem_name: str, value: Union[str, List[str]], modifiers: List[str] = None) -> Union[str, List[str]]:
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
-        # Skip escaping for 'cidr' modifier to preserve raw CIDR notation
         if modifiers and 'cidr' in modifiers:
             value = str(value)
         else:
@@ -112,7 +111,7 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_exists(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value  # Fixed: Return raw value, not boolean
+        return value
 
     def _handle_base64(self, siem_name: str, value: str, mods: List[str]) -> str:
         return base64.b64encode(value.encode('ascii')).decode('ascii')
@@ -204,7 +203,7 @@ class UnifiedSIEMEngine:
                 windash_values = formatted_value.split('|')
                 windash_templates = siem_def.get('windash_templates')
                 if not windash_templates:
-                    logging.error(f"SIEM '{siem_name}' supports 'windash' but lacks 'windash_templates' in definitions")
+                    logging.error(f"SIEM '{siem_name}' supports 'windash' but lacks 'windash_templates'")
                     raise ValueError(f"Missing 'windash_templates' for {siem_name}")
                 if windash_strategy == 'regex':
                     condition = windash_templates['regex'].format(field=mapped_field, value=formatted_value)
@@ -220,6 +219,15 @@ class UnifiedSIEMEngine:
                 if 'm' in modifiers: flags += ' MULTILINE'
                 if 's' in modifiers: flags += ' DOTALL'
                 condition = operators['re'].format(field=mapped_field, value=formatted_value, flags=flags.strip())
+            elif operator_key == 'cidr' and 'cidr' in operators:
+                siem_cidr_supports_array = siem_def.get('cidr_supports_array', False)
+                if isinstance(formatted_value, list):
+                    if not siem_cidr_supports_array:
+                        logging.warning(f"SIEM '{siem_name}' does not support CIDR arrays; using first value {formatted_value[0]}")
+                        formatted_value = formatted_value[0]
+                    condition = operators['cidr'].format(field=mapped_field, value=f'[{",".join(f"\"{v}\"" for v in formatted_value)}]' if siem_cidr_supports_array else f'"{formatted_value}"')
+                else:
+                    condition = operators['cidr'].format(field=mapped_field, value=f'"{formatted_value}"')
             elif operator_key not in operators:
                 logging.warning(f"Operator '{operator_key}' not supported for '{siem_name}', defaulting to 'equals'")
                 condition = operators['equals'].format(field=mapped_field, value=formatted_value)
@@ -251,6 +259,9 @@ class UnifiedSIEMEngine:
                 result = " ".join(expr_parts) if not is_elastic else f'"must": [{"".join(expr_parts)}]'
                 return result, i + 1
             elif token in ('and', 'or'):
+                if token == 'or' and siem_name == 'crowdstrike' and any('cidr(' in part for part in expr_parts):
+                    logging.error("Crowdstrike does not support 'OR' with cidr()")
+                    raise ValueError("Invalid use of 'OR' with cidr in Crowdstrike")
                 expr_parts.append(token.upper() if not is_elastic else f'"{token}": [')
                 i += 1
             elif token == 'not':
@@ -331,7 +342,6 @@ class UnifiedSIEMEngine:
     def evaluate_field_condition(self, siem_name: str, field: str, condition_value: Union[str, List[str]], modifiers: List[str], event: dict) -> bool:
         mapped_field = self.map_field(siem_name, field)
         event_value = event.get(mapped_field, event.get(field))
-        # Use raw condition_value instead of formatted_value to avoid escape_chars interference in testing
         formatted_value = condition_value if isinstance(condition_value, list) else str(condition_value)
         
         eval_funcs = {
@@ -353,7 +363,7 @@ class UnifiedSIEMEngine:
             'week': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').isocalendar()[1]) == int(cv) if ev else False,
             'month': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').month) == int(cv) if ev else False,
             'year': lambda ev, cv: int(datetime.datetime.strptime(ev, '%Y-%m-%dT%H:%M:%S.%fZ').year) == int(cv) if ev else False,
-            'cidr': lambda ev, cv: ipaddress.ip_address(ev) in ipaddress.ip_network(cv, strict=False) if ev and cv else False,
+            'cidr': lambda ev, cv: any(ipaddress.ip_address(ev) in ipaddress.ip_network(v, strict=False) for v in (cv if isinstance(cv, list) else [cv])) if ev and cv else False,
             'fieldref': lambda ev, cv: str(ev) == str(event.get(cv)) if ev is not None else False,
         }
         op = modifiers[0] if modifiers else 'equals'

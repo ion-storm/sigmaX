@@ -57,7 +57,7 @@ siems:
         last_7_days: "now-7d"
         last_30_days: "now-30d"
         default: "now()-24h"
-    query_template: "{index} {conditions} {time_filter}"
+    query_template: "{index} {conditions} {time_filter} | mitre_attack:=\"{tags}\""
     value_format: "default"
     windash_strategy: "regex"
     escape_chars:

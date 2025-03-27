@@ -33,6 +33,7 @@ siems:
   crowdstrike:
     name: "CrowdStrike LogScale Query Language"
     include_time_filter: false
+    cidr_supports_array: true
     index_map:
       process_creation: "#repo=Falcon #event_simpleName=ProcessRollup2"
       firewall: "#repo=Falcon #event_simpleName=NetworkConnectIP4"

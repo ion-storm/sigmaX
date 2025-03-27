@@ -12,6 +12,7 @@ siems:
       re: "match({field}, \"{value}\")"
       equals: "{field}=\"{value}\""
       exists: "{field}=\"*\""
+      cidr: "cidr({field}, subnet=\"{value}\")"
     group_conditions:
       all_of: "({conditions})"
       any_of: "({conditions})"

@@ -28,7 +28,7 @@ class UnifiedSIEMEngine:
             "utf16le": lambda v: v.encode('utf-16le'), "utf16be": lambda v: v.encode('utf-16be'),
             "utf16": lambda v: b'\xFF\xFE' + v.encode('utf-16le'), "wide": lambda v: v.encode('utf-16le'),
         }
-        self.siem_name = None  # Set during query generation/evaluation
+        self.siem_name = None
 
     def load_yaml_file(self, path: str) -> dict:
         """Load a YAML file safely."""
@@ -83,7 +83,7 @@ class UnifiedSIEMEngine:
         return value
 
     def _handle_endswith(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value.strip('\\')
+        return value  # Removed strip('\\') to align with Sigma
 
     def _handle_regex(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
@@ -98,11 +98,19 @@ class UnifiedSIEMEngine:
         return base64.b64encode(value.encode('ascii')).decode('ascii')
 
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        """Generate Base64 variants with 0-2 byte shifts."""
+        encoded = value.encode('ascii')
+        variants = []
+        for shift in range(3):
+            padded = b' ' * shift + encoded
+            variants.append(base64.b64encode(padded).decode('ascii'))
+        return '|'.join(variants)  # Return OR-separated variants
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
+        """Expand placeholders; defaults to wildcard if unhandled."""
         if value.startswith('%') and value.endswith('%'):
-            logging.warning(f"Placeholder '{value}' not expanded (requires pipeline)")
+            logging.warning(f"Placeholder '{value}' not expanded (pipeline missing); using wildcard")
+            return '*'
         return value
 
     def _handle_windash(self, siem_name: str, value: str, mods: List[str]) -> str:
@@ -306,10 +314,11 @@ class UnifiedSIEMEngine:
             'equals': lambda e, v: str(e) == str(v) if e is not None else False,
             'contains': lambda e, v: str(v) in str(e) if e is not None else False,
             'startswith': lambda e, v: str(e).startswith(str(v)) if e is not None else False,
-            'endswith': lambda e, v: str(e).replace('\\', '/').endswith(str(v).replace('\\', '/').strip('/')) if e is not None else False,
+            'endswith': lambda e, v: str(e).endswith(str(v)) if e is not None else False,
             're': lambda e, v: bool(re.search(v, str(e), (re.I if 'i' in modifiers else 0) | (re.M if 'm' in modifiers else 0) | (re.S if 's' in modifiers else 0))) if e is not None else False,
             'exists': lambda e, v: (e is not None) == (str(v).lower() in ('true', '1')),
             'base64': lambda e, v: str(e) == base64.b64encode(str(v).encode('ascii')).decode('ascii') if e is not None else False,
+            'base64offset': lambda e, v: any(str(e) == v.split('|')[i] for i in range(3)) if e is not None else False,
             'windash': lambda e, v: any(re.search(re.escape(d), str(e)) for d in str(v).split('|')) if e is not None else False,
             'lt': lambda e, v: float(e) < float(v) if e is not None else False,
             'lte': lambda e, v: float(e) <= float(v) if e is not None else False,
@@ -326,7 +335,7 @@ class UnifiedSIEMEngine:
         }
         func = evals.get(op, evals['equals'])
         if 'cased' in modifiers and op in {'equals', 'contains', 'startswith', 'endswith'}:
-            pass  # Case-sensitive by default
+            pass
         elif op in {'equals', 'contains', 'startswith', 'endswith'}:
             ev, val = str(ev).lower() if ev else None, [v.lower() for v in val] if isinstance(val, list) else str(val).lower()
         return all(func(ev, v) for v in val) if isinstance(val, list) and 'all' in modifiers else any(func(ev, v) for v in val) if isinstance(val, list) else func(ev, val)

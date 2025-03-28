@@ -46,6 +46,7 @@ siems:
       re: "{field}=/{value}/i"
       equals: "{field}=\"{value}\""
       exists: "{field}=*"
+      base64offset: "{field}=/{value}/i"
     group_conditions:
       all_of: "({conditions})"
       any_of: "({conditions})"

@@ -313,33 +313,38 @@ class UnifiedSIEMEngine:
         condition = detection['condition']
         if isinstance(condition, list):
             condition = ' OR '.join(condition)
+        logging.debug(f"generate_query: condition = {condition}")
         translated_conditions = self.parse_condition(siem_name, condition, detection)
+        logging.debug(f"generate_query: translated_conditions = {translated_conditions}")
         time_field = sigma_rule.get('time_field', siem_def.get('default_time_field', 'timestamp'))
         time_filter = self.generate_time_filter(siem_name, sigma_rule.get('time_range', 'last_24_hours')).format(time_field=time_field) if siem_def.get('include_time_filter', True) else ''
+        logging.debug(f"generate_query: time_filter = {time_filter}")
         if translated_conditions and time_filter:
-            full_conditions = siem_def.get('joiner_all_of', ' AND ').join([translated_conditions, time_filter])
+            full_conditions = siem_def.get('joiner_all_of', ' AND ').join([str(translated_conditions), str(time_filter)])
         else:
             full_conditions = translated_conditions or time_filter
+        logging.debug(f"generate_query: full_conditions = {full_conditions}")
         query_template = siem_def['query_template']
         template_vars = {
             "columns": sigma_rule.get('columns', siem_def.get('default_columns', '*')),
             "index": fields,
             "conditions": full_conditions,
             "time_filter": time_filter,
-            # Add metadata fields from the Sigma rule
             "title": sigma_rule.get('title', ''),
             "description": sigma_rule.get('description', ''),
             "id": sigma_rule.get('id', ''),
         }
-        # Include tags (e.g., MITRE ATT&CK) if present
         if 'tags' in sigma_rule:
             template_vars['tags'] = ' '.join(sigma_rule['tags']) if isinstance(sigma_rule['tags'], list) else sigma_rule['tags']
-        # Add all top-level Sigma rule fields dynamically
         for key, value in sigma_rule.items():
             if key not in ['detection', 'logsource', 'columns', 'time_field', 'time_range', 'test_log'] and key not in template_vars:
-                template_vars[key] = ' '.join(value) if isinstance(value, list) else str(value)
-        if "{fields}" in query_template:
-            template_vars["fields"] = fields
+                if isinstance(value, list):
+                    template_vars[key] = ' '.join(str(v) for v in value)
+                elif isinstance(value, dict):
+                    template_vars[key] = str(value)  # Convert dict to string representation
+                else:
+                    template_vars[key] = str(value)
+        logging.debug(f"generate_query: template_vars = {template_vars}")
         try:
             return query_template.format(**template_vars)
         except KeyError as e:

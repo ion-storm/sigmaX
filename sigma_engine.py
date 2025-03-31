@@ -45,12 +45,12 @@ class UnifiedSIEMEngine:
         except Exception as e:
             logging.error(f"Failed to load YAML file {path}: {e}")
             raise
-
+    
     def map_field(self, siem_name: str, field: str) -> str:
         """Map Sigma field to SIEM-specific field."""
         siem = self.definitions['siems'].get(siem_name, {})
         mapped = siem.get('field_mappings', {}).get(field, field)
-        if mapped == field and field not in siem.get('known_fields', []):
+        if field not in siem.get('field_mappings', {}):
             logging.warning(f"Field '{field}' not mapped for {siem_name}")
         return mapped
 

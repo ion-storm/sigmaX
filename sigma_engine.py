@@ -45,6 +45,7 @@ class UnifiedSIEMEngine:
         except Exception as e:
             logging.error(f"Failed to load YAML file {path}: {e}")
             raise
+
     
     def map_field(self, siem_name: str, field: str) -> str:
         """Map Sigma field to SIEM-specific field."""
@@ -63,7 +64,11 @@ class UnifiedSIEMEngine:
 
     def format_value(self, siem_name: str, value: Union[str, List], modifiers: List[str] = None) -> Union[str, List]:
         """Format a value with modifiers for SIEM compatibility."""
-        # Handle list values recursively
+        # Handle list values for CIDR specifically
+        if 'cidr' in (modifiers or []) and isinstance(value, list):
+            return self._handle_cidr(siem_name, value, modifiers)
+        
+        # Handle other list values recursively
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
         
@@ -121,7 +126,10 @@ class UnifiedSIEMEngine:
         return '|'.join(value.replace('-', d) for d in dashes)
 
     def _handle_cidr(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
+        siem = self.definitions['siems'].get(siem_name, {})
+        if siem.get('cidr_supports_array', False) and isinstance(value, list):
+            return '[' + ','.join(f'"{v}"' for v in value) + ']'
+        return f'"{value}"'
 
     def _handle_fieldref(self, siem_name: str, value: str, mods: List[str]) -> str:
         return self.map_field(siem_name, value)
@@ -139,14 +147,22 @@ class UnifiedSIEMEngine:
         is_elastic = siem_name == "elasticsearch"
         joiner_any = siem.get('joiner_any_of', ' OR ' if not is_elastic else ', ')
         joiner_all = siem.get('joiner_all_of', ' AND ' if not is_elastic else ', ')
+        
         if isinstance(search, list):
             conditions = [self._translate_dict(siem_name, item) if isinstance(item, dict) else [self.format_value(siem_name, item)]
-                          for item in search]
-            conditions = [c[0] if len(c) == 1 else siem['group_conditions']['any_of'].format(conditions=joiner_any.join(c)) for c in conditions]
-            result = siem['group_conditions']['any_of'].format(conditions=joiner_any.join(conditions))
+                        for item in search]
+            # Flatten single-condition lists and avoid wrapping unless multiple conditions
+            conditions = [c[0] if len(c) == 1 else joiner_any.join(c) for c in conditions]
+            if len(conditions) == 1:
+                result = conditions[0]
+            else:
+                result = f"({joiner_any.join(conditions)})"  # Only wrap if multiple conditions
         elif isinstance(search, dict):
             conditions = self._translate_dict(siem_name, search)
-            result = siem['group_conditions']['all_of'].format(conditions=joiner_all.join(conditions))
+            if len(conditions) == 1:
+                result = conditions[0]
+            else:
+                result = f"({joiner_all.join(conditions)})"  # Only wrap if multiple conditions
         else:
             raise ValueError(f"Invalid search structure for '{search_id}'")
         return f'{{"query_string": {{"query": "{result}"}}}}' if is_elastic else result
@@ -179,7 +195,7 @@ class UnifiedSIEMEngine:
                 if isinstance(val, list) and not cidr_array:
                     logging.warning(f"SIEM '{siem_name}' does not support CIDR arrays; using first value {val[0]}")
                     val = val[0]
-                condition = ops['cidr'].format(field=mapped_field, value='[' + ','.join(f'"{v}"' for v in val) + ']' if isinstance(val, list) and cidr_array else f'"{val}"')
+                condition = ops['cidr'].format(field=mapped_field, value=val if cidr_array else f'"{val}"')
             elif op not in ops:
                 logging.warning(f"Operator '{op}' not supported for '{siem_name}', defaulting to 'equals'")
                 condition = ops['equals'].format(field=mapped_field, value=val)
@@ -187,14 +203,13 @@ class UnifiedSIEMEngine:
                 sub = [ops[op].format(field=mapped_field, value=v) for v in val]
                 condition = siem['group_conditions']['all_of' if 'all' in modifiers else 'any_of'].format(conditions=' AND '.join(sub) if 'all' in modifiers else ' OR '.join(sub))
             elif op in {'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'} and op in ops:
-                condition = ops['op'].format(field=mapped_field, value=val)
+                condition = ops[op].format(field=mapped_field, value=val)  # Fixed: Use ops[op] instead of ops['op']
             else:
-                condition = ops[op].format(field=mapped_field, value=val, flags=flags)
+                condition = ops[op].format(field=mapped_field, value=val, flags=flags)  # Fixed: Use ops[op] instead of ops['op']
             conditions.append(condition)
         return conditions
 
     def _parse_expr(self, tokens: List[str], siem_name: str, detection: dict, siem_def: dict, i: int = 0) -> Tuple[str, int]:
-        """Parse condition expression recursively."""
         parts = []
         is_elastic = siem_name == "elasticsearch"
         while i < len(tokens):
@@ -210,16 +225,29 @@ class UnifiedSIEMEngine:
                     logging.error("Crowdstrike does not support 'OR' with cidr()")
                     raise ValueError("Invalid use of 'OR' with cidr in Crowdstrike")
                 parts.append(tok.upper() if not is_elastic else f'"{tok}": [')
+            elif tok == 'not' and i + 3 < len(tokens) and tokens[i + 1] == '1' and tokens[i + 2] == 'of':
+                i += 3
+                pattern = tokens[i] if i < len(tokens) else '*'
+                matches = [sid for sid in detection if sid != 'condition' and re.match(pattern.replace('*', '.*'), sid)]
+                if matches:
+                    sub = [self.translate_search(siem_name, sid, detection[sid]) for sid in matches]
+                    joiner = siem_def.get('joiner_any_of', ' OR ' if not is_elastic else ', ')
+                    expr = siem_def['group_conditions']['any_of'].format(conditions=joiner.join(sub))
+                    parts.append(f"NOT ({expr})" if not is_elastic else f'"must_not": [{{"query_string": {{"query": "{expr}"}}}}]')
+                else:
+                    parts.append('NOT *')
+                i += 1
             elif tok == 'not':
                 parts.append('NOT' if not is_elastic else '"must_not": [')
+                i += 1
             elif tok in ('1', 'all') and i + 1 < len(tokens) and tokens[i + 1].lower() == 'of':
                 op, i = tok, i + 2
                 pattern = tokens[i] if i < len(tokens) else '*'
                 matches = [sid for sid in detection if sid != 'condition' and re.match(pattern.replace('*', '.*'), sid)]
                 if matches:
                     sub = [self.translate_search(siem_name, sid, detection[sid]) for sid in matches]
-                    joiner = siem_def.get('joiner_any_of' if op == '1' else 'joiner_all_of', ' OR ' if not is_elastic else ', ')
-                    expr = siem_def['group_conditions']['any_of' if op == '1' else 'all_of'].format(conditions=joiner.join(sub))
+                    joiner = siem_def.get('joiner_all_of' if op == 'all' else 'joiner_any_of', ' AND ' if not is_elastic else ', ')
+                    expr = siem_def['group_conditions']['all_of' if op == 'all' else 'any_of'].format(conditions=joiner.join(sub))
                     parts.append(expr if not is_elastic else f'{{"query_string": {{"query": "{expr}"}}}}')
                 i += 1
             elif tok in detection and tok != 'condition':
@@ -227,8 +255,11 @@ class UnifiedSIEMEngine:
             else:
                 parts.append(tokens[i])
             i += 1
-        return " ".join(parts) if not is_elastic else f'"must": [{"".join(parts)}]', i
-
+        # Join parts with spaces unless it's a top-level 'and' followed by 'not'
+        if len(parts) > 2 and parts[-2] == 'AND' and parts[-1].startswith('NOT'):
+            return ' '.join(parts[:-2]) + ' ' + parts[-1], i
+        return siem_def.get('joiner_all_of', ' AND ').join(parts) if not is_elastic else f'"must": [{"".join(parts)}]', i
+    
     def parse_condition(self, siem_name: str, condition: str, detection: dict) -> str:
         """Parse Sigma condition into a SIEM query."""
         siem = self.definitions['siems'][siem_name]
@@ -256,7 +287,7 @@ class UnifiedSIEMEngine:
             time_field=sigma_rule.get('time_field', siem.get('default_time_field', 'timestamp'))
         ) if siem.get('include_time_filter', False) else ''
         logging.debug(f"generate_query: time_filter = {time_filter}")
-        full_conditions = siem.get('joiner_all_of', ' AND ').join(filter(None, [conditions, time_filter]))
+        full_conditions = conditions if not time_filter else siem.get('joiner_all_of', ' AND ').join([conditions, time_filter])
         logging.debug(f"generate_query: full_conditions = {full_conditions}")
         vars = {
             'columns': sigma_rule.get('columns', siem.get('default_columns', '*')),

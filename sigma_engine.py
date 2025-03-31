@@ -8,21 +8,28 @@ import datetime
 import ipaddress
 from typing import Dict, List, Union, Tuple
 
-logging.basicConfig(level=logging.DEBUG, format="%(levelname)s: %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
 
 class UnifiedSIEMEngine:
     """Engine to convert Sigma rules into SIEM queries and test them."""
     def __init__(self, definition_file: str):
         self.definitions = self.load_yaml_file(definition_file)
         self.modifier_handlers = {
-            "contains": self._handle_contains, "startswith": self._handle_startswith, "endswith": self._handle_endswith,
-            "re": self._handle_regex, "equals": self._handle_equals, "exists": self._handle_exists,
-            "base64": self._handle_base64, "base64offset": self._handle_base64offset, "expand": self._handle_expand,
-            "windash": self._handle_windash, "cased": self._handle_cased,
-            "lt": self._handle_lt, "lte": self._handle_lte, "gt": self._handle_gt, "gte": self._handle_gte,
-            "minute": self._handle_minute, "hour": self._handle_hour, "day": self._handle_day,
-            "week": self._handle_week, "month": self._handle_month, "year": self._handle_year,
-            "cidr": self._handle_cidr, "fieldref": self._handle_fieldref,
+            # Simple passthrough modifiers
+            **{mod: lambda siem, val, mods: val for mod in [
+                'contains', 'startswith', 'endswith', 'equals', 'exists', 'cased',
+                'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'
+            ]},
+            # Special handlers
+            "re": self._handle_regex,
+            "base64": self._handle_base64,
+            "base64offset": self._handle_base64offset,
+            "expand": self._handle_expand,
+            "windash": self._handle_windash,
+            "cidr": self._handle_cidr,
+            "fieldref": self._handle_fieldref,
+            "not_contains": self._handle_not_contains,
+            "not_equals": self._handle_not_equals,
         }
         self.encoding_handlers = {
             "utf16le": lambda v: v.encode('utf-16le'), "utf16be": lambda v: v.encode('utf-16be'),
@@ -56,12 +63,22 @@ class UnifiedSIEMEngine:
 
     def format_value(self, siem_name: str, value: Union[str, List], modifiers: List[str] = None) -> Union[str, List]:
         """Format a value with modifiers for SIEM compatibility."""
+        # Handle list values recursively
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
-        value = str(value) if 'cidr' not in (modifiers or []) else str(value)
-        value = self.escape_value(siem_name, value)
+        
+        # Coerce to string unless it's a CIDR value
+        value = str(value) if value is not None else ''
+        
+        # Skip escaping for CIDR values
+        if 'cidr' not in (modifiers or []):
+            value = self.escape_value(siem_name, value)
+        
+        # Handle null values
         if value == 'null':
             return 'null'
+        
+        # Apply modifiers
         if modifiers:
             encoding = next((m for m in modifiers if m in self.encoding_handlers), None)
             for mod in modifiers:
@@ -71,27 +88,16 @@ class UnifiedSIEMEngine:
                     logging.warning(f"Unsupported modifier '{mod}' for {siem_name}")
             if encoding:
                 value = base64.b64encode(self.encoding_handlers[encoding](value)).decode('ascii')
+        
+        # Apply SIEM-specific formatting
         siem = self.definitions['siems'][siem_name]
         fmt = siem.get('value_format', 'default')
-        return f'"{value}"' if fmt == 'always_quote' or (fmt == 'quote_if_space' and ' ' in value) else value
+        if fmt == 'always_quote' or (fmt == 'quote_if_space' and ' ' in value):
+            return f'"{value}"'
+        return value
 
     # Modifier Handlers
-    def _handle_contains(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_startswith(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_endswith(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value  # Removed strip('\\') to align with Sigma
-
     def _handle_regex(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_equals(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_exists(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
     def _handle_base64(self, siem_name: str, value: str, mods: List[str]) -> str:
@@ -100,11 +106,8 @@ class UnifiedSIEMEngine:
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
         """Generate Base64 variants with 0-2 byte shifts."""
         encoded = value.encode('ascii')
-        variants = []
-        for shift in range(3):
-            padded = b' ' * shift + encoded
-            variants.append(base64.b64encode(padded).decode('ascii'))
-        return '|'.join(variants)  # Return OR-separated variants
+        variants = [base64.b64encode(b' ' * shift + encoded).decode('ascii') for shift in range(3)]
+        return '|'.join(variants)
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
         """Expand placeholders; defaults to wildcard if unhandled."""
@@ -117,44 +120,17 @@ class UnifiedSIEMEngine:
         dashes = ['-', '/', '–', '—', '―']
         return '|'.join(value.replace('-', d) for d in dashes)
 
-    def _handle_cased(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_lt(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_lte(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_gt(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_gte(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_minute(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_hour(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_day(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_week(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_month(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
-    def _handle_year(self, siem_name: str, value: str, mods: List[str]) -> str:
-        return value
-
     def _handle_cidr(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
     def _handle_fieldref(self, siem_name: str, value: str, mods: List[str]) -> str:
         return self.map_field(siem_name, value)
+
+    def _handle_not_contains(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
+
+    def _handle_not_equals(self, siem_name: str, value: str, mods: List[str]) -> str:
+        return value
 
     def translate_search(self, siem_name: str, search_id: str, search: Union[dict, list]) -> str:
         """Translate a search condition into a SIEM query."""
@@ -211,7 +187,7 @@ class UnifiedSIEMEngine:
                 sub = [ops[op].format(field=mapped_field, value=v) for v in val]
                 condition = siem['group_conditions']['all_of' if 'all' in modifiers else 'any_of'].format(conditions=' AND '.join(sub) if 'all' in modifiers else ' OR '.join(sub))
             elif op in {'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'} and op in ops:
-                condition = ops[op].format(field=mapped_field, value=val)
+                condition = ops['op'].format(field=mapped_field, value=val)
             else:
                 condition = ops[op].format(field=mapped_field, value=val, flags=flags)
             conditions.append(condition)
@@ -290,8 +266,9 @@ class UnifiedSIEMEngine:
             'title': sigma_rule.get('title', ''),
             'description': sigma_rule.get('description', ''),
             'id': sigma_rule.get('id', ''),
+            'tags': ' '.join(sigma_rule.get('tags', [])),
             **{k: ' '.join(map(str, v)) if isinstance(v, list) else str(v)
-               for k, v in sigma_rule.items() if k not in ('detection', 'logsource', 'columns', 'time_field', 'time_range', 'test_log')}
+               for k, v in sigma_rule.items() if k not in ('detection', 'logsource', 'columns', 'time_field', 'time_range', 'test_log', 'tags')}
         }
         logging.debug(f"generate_query: template_vars = {vars}")
         try:
@@ -312,7 +289,9 @@ class UnifiedSIEMEngine:
         op = modifiers[0] if modifiers else 'equals'
         evals = {
             'equals': lambda e, v: str(e) == str(v) if e is not None else False,
+            'not_equals': lambda e, v: str(e) != str(v) if e is not None else False,
             'contains': lambda e, v: str(v) in str(e) if e is not None else False,
+            'not_contains': lambda e, v: str(v) not in str(e) if e is not None else False,
             'startswith': lambda e, v: str(e).startswith(str(v)) if e is not None else False,
             'endswith': lambda e, v: str(e).endswith(str(v)) if e is not None else False,
             're': lambda e, v: bool(re.search(v, str(e), (re.I if 'i' in modifiers else 0) | (re.M if 'm' in modifiers else 0) | (re.S if 's' in modifiers else 0))) if e is not None else False,
@@ -334,9 +313,9 @@ class UnifiedSIEMEngine:
             'fieldref': lambda e, v: str(e) == str(event.get(v)) if e is not None else False,
         }
         func = evals.get(op, evals['equals'])
-        if 'cased' in modifiers and op in {'equals', 'contains', 'startswith', 'endswith'}:
+        if 'cased' in modifiers and op in {'equals', 'not_equals', 'contains', 'not_contains', 'startswith', 'endswith'}:
             pass
-        elif op in {'equals', 'contains', 'startswith', 'endswith'}:
+        elif op in {'equals', 'not_equals', 'contains', 'not_contains', 'startswith', 'endswith'}:
             ev, val = str(ev).lower() if ev else None, [v.lower() for v in val] if isinstance(val, list) else str(val).lower()
         return all(func(ev, v) for v in val) if isinstance(val, list) and 'all' in modifiers else any(func(ev, v) for v in val) if isinstance(val, list) else func(ev, val)
 
@@ -394,34 +373,39 @@ class UnifiedSIEMEngine:
         if not test_log:
             print("No test_log provided in the rule.")
             return
-        print(f"\n=== Testing Rule: {sigma_rule.get('title', 'Untitled')} ===")
-        print("Raw Test Log:", test_log)
+        
+        title = sigma_rule.get('title', 'Untitled')
+        print(f"\n{'='*50}")
+        print(f"Testing Rule: {title}")
+        print(f"{'='*50}")
+        
         try:
             event = yaml.safe_load(test_log)
             if not isinstance(event, dict):
                 raise ValueError("test_log must be a JSON/YAML object")
         except Exception as e:
-            print(f"Error parsing test_log: {e}")
+            print(f"❌ Error parsing test_log: {e}")
             return
-        print("\nParsed Event:", event)
+        
         detection = sigma_rule.get('detection', {})
-        print("\nDetection Conditions:", detection)
         results = {}
+        
         for key, cond in detection.items():
             if key != 'condition':
                 result = self.evaluate_search_identifier(siem_name, cond, event)
                 results[key] = result
-                print(f"\nEvaluating '{key}': {result}")
+                print(f"\n🔍 Evaluating '{key}': {'✅' if result else '❌'}")
                 if isinstance(cond, dict):
                     for f, v in cond.items():
                         mods = f.split('|')[1:] if '|' in f else []
                         fname = f.split('|')[0]
                         eval_result = self.evaluate_field_condition(siem_name, fname, v, mods, event)
-                        print(f"  {f}: {eval_result} (Expected: {v}, Got: {event.get(fname)})")
+                        print(f"  {'✅' if eval_result else '❌'} {f}: Expected: {v}, Got: {event.get(self.map_field(siem_name, fname), 'MISSING')}")
+        
         final = self.evaluate_detection(siem_name, detection, event)
-        print(f"\nFinal Condition: {detection.get('condition')}")
-        print("Evaluation Results:", results)
-        print("\nTest Result:", "PASSED" if final else "FAILED")
+        print(f"\n📊 Final Condition: {detection.get('condition')}")
+        print(f"📈 Evaluation Results: {results}")
+        print(f"\n🏆 Test Result: {'✅ PASSED' if final else '❌ FAILED'}")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate or test SIEM queries from Sigma rules.")

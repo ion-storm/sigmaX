@@ -6,13 +6,18 @@ siems:
       firewall: "index=firewall"
       default: "index=main"
     operators:
-      contains: "{field}=*{value}*"
-      startswith: "{field}={value}*"
-      endswith: "match({field}, \".*{value}$\")"
-      re: "match({field}, \"{value}\")"
-      equals: "{field}=\"{value}\""
-      exists: "{field}=\"*\""
-      cidr: "cidr({field}, subnet=\"{value}\")"
+      contains: "{field}=\"*{value}*\""  # Quoted value with wildcards
+      not_contains: "{field}!=\"*{value}*\""  # Quoted value with wildcards
+      startswith: "{field}=\"{value}*\""  # Quoted value with trailing wildcard
+      endswith: "{field}=\"*{value}\""  # Quoted value with leading wildcard
+      lt: "{field}<{value}"  # Less than (numeric comparison)
+      lte: "{field}<={value}"  # Less than or equal (numeric comparison)
+      gt: "{field}>{value}"  # Greater than (numeric comparison)
+      gte: "{field}>={value}"  # Greater than or equal (numeric comparison)
+      re: "match({field}, \"{value}\")"  # Unquoted value (regex pattern)
+      equals: "{field}=\"{value}\""  # Quoted value
+      not_equals: "{field}!=\"{value}\""  # Quoted value
+      exists: "{field}=*"  # No quotes needed, checks existence
     group_conditions:
       all_of: "({conditions})"
       any_of: "({conditions})"
@@ -41,12 +46,19 @@ siems:
       default: "logs"
     operators:
       contains: "{field}=/{value}/i"
+      not_contains: "{field}!=/{value}/i"
+      base64offset: "{field}=/{value}/i"
       startswith: "{field}=/^{value}/i"
       endswith: "{field}=/{value}$/i"
-      re: "{field}=/{value}/i"
+      lt: "{field}<\"{value}\""  # Less than (numeric or string comparison)
+      lte: "{field}<=\"{value}\""  # Less than or equal
+      gt: "{field}>\"{value}\""  # Greater than
+      gte: "{field}>=\"{value}\""  # Greater than or equal
+      re: "{field}=/{value}/{flags}"
       equals: "{field}=\"{value}\""
+      not_equals: "{field}!=\"{value}\""
       exists: "{field}=*"
-      base64offset: "{field}=/{value}/i"
+      cidr: "cidr({field}, subnet={value})"
     group_conditions:
       all_of: "({conditions})"
       any_of: "({conditions})"
@@ -66,15 +78,16 @@ siems:
       "/": "\\/"
       '"': "\\\""
       ' ': "\\s"
+      '.': "\\."
     field_mappings:
-      CommandLine: "cmdline"
-      Image: "image"
-      ParentImage: "parent_image"
-      OriginalFileName: "orig_file"
+      CommandLine: "CommandLine"
+      Image: "Image"
+      ParentImage: "ParentImage"
+      OriginalFileName: "OriginalFileName"
+      IntegrityLevel: "IntegrityLevel"
 
   elasticsearch:
     name: "Kibana Query Language"
-    include_time_filter: false
     index_map:
       process_creation: "index=winlogbeat-*"
       firewall: "index=packetbeat-*"

@@ -17,7 +17,7 @@ class UnifiedSIEMEngine:
         self.modifier_handlers = {
             # Simple passthrough modifiers
             **{mod: lambda siem, val, mods: val for mod in [
-                'contains', 'startswith', 'endswith', 'equals', 'exists', 'cased',
+                'contains', 'startswith', 'endswith', 'equals', 'cased',
                 'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'
             ]},
             # Special handlers
@@ -30,6 +30,7 @@ class UnifiedSIEMEngine:
             "fieldref": self._handle_fieldref,
             "not_contains": self._handle_not_contains,
             "not_equals": self._handle_not_equals,
+            "exists": self._handle_exists,  # Added exists modifier
         }
         self.encoding_handlers = {
             "utf16le": lambda v: v.encode('utf-16le'), "utf16be": lambda v: v.encode('utf-16be'),
@@ -46,7 +47,6 @@ class UnifiedSIEMEngine:
             logging.error(f"Failed to load YAML file {path}: {e}")
             raise
 
-    
     def map_field(self, siem_name: str, field: str) -> str:
         """Map Sigma field to SIEM-specific field."""
         siem = self.definitions['siems'].get(siem_name, {})
@@ -64,26 +64,20 @@ class UnifiedSIEMEngine:
 
     def format_value(self, siem_name: str, value: Union[str, List], modifiers: List[str] = None) -> Union[str, List]:
         """Format a value with modifiers for SIEM compatibility."""
-        # Handle list values for CIDR specifically
         if 'cidr' in (modifiers or []) and isinstance(value, list):
             return self._handle_cidr(siem_name, value, modifiers)
         
-        # Handle other list values recursively
         if isinstance(value, list):
             return [self.format_value(siem_name, v, modifiers) for v in value]
         
-        # Coerce to string unless it's a CIDR value
         value = str(value) if value is not None else ''
         
-        # Skip escaping for CIDR values
         if 'cidr' not in (modifiers or []):
             value = self.escape_value(siem_name, value)
         
-        # Handle null values
         if value == 'null':
             return 'null'
         
-        # Apply modifiers
         if modifiers:
             encoding = next((m for m in modifiers if m in self.encoding_handlers), None)
             for mod in modifiers:
@@ -94,7 +88,6 @@ class UnifiedSIEMEngine:
             if encoding:
                 value = base64.b64encode(self.encoding_handlers[encoding](value)).decode('ascii')
         
-        # Apply SIEM-specific formatting
         siem = self.definitions['siems'][siem_name]
         fmt = siem.get('value_format', 'default')
         if fmt == 'always_quote' or (fmt == 'quote_if_space' and ' ' in value):
@@ -109,13 +102,11 @@ class UnifiedSIEMEngine:
         return base64.b64encode(value.encode('ascii')).decode('ascii')
 
     def _handle_base64offset(self, siem_name: str, value: str, mods: List[str]) -> str:
-        """Generate Base64 variants with 0-2 byte shifts."""
         encoded = value.encode('ascii')
         variants = [base64.b64encode(b' ' * shift + encoded).decode('ascii') for shift in range(3)]
         return '|'.join(variants)
 
     def _handle_expand(self, siem_name: str, value: str, mods: List[str]) -> str:
-        """Expand placeholders; defaults to wildcard if unhandled."""
         if value.startswith('%') and value.endswith('%'):
             logging.warning(f"Placeholder '{value}' not expanded (pipeline missing); using wildcard")
             return '*'
@@ -140,8 +131,11 @@ class UnifiedSIEMEngine:
     def _handle_not_equals(self, siem_name: str, value: str, mods: List[str]) -> str:
         return value
 
+    def _handle_exists(self, siem_name: str, value: str, mods: List[str]) -> str:
+        # Return the raw value ('true' or 'false') for SIEM-specific handling in _translate_dict
+        return value
+
     def translate_search(self, siem_name: str, search_id: str, search: Union[dict, list]) -> str:
-        """Translate a search condition into a SIEM query."""
         siem = self.definitions['siems'].get(siem_name, {})
         ops = siem['operators']
         is_elastic = siem_name == "elasticsearch"
@@ -151,24 +145,22 @@ class UnifiedSIEMEngine:
         if isinstance(search, list):
             conditions = [self._translate_dict(siem_name, item) if isinstance(item, dict) else [self.format_value(siem_name, item)]
                         for item in search]
-            # Flatten single-condition lists and avoid wrapping unless multiple conditions
             conditions = [c[0] if len(c) == 1 else joiner_any.join(c) for c in conditions]
             if len(conditions) == 1:
                 result = conditions[0]
             else:
-                result = f"({joiner_any.join(conditions)})"  # Only wrap if multiple conditions
+                result = f"({joiner_any.join(conditions)})"
         elif isinstance(search, dict):
             conditions = self._translate_dict(siem_name, search)
             if len(conditions) == 1:
                 result = conditions[0]
             else:
-                result = f"({joiner_all.join(conditions)})"  # Only wrap if multiple conditions
+                result = f"({joiner_all.join(conditions)})"
         else:
             raise ValueError(f"Invalid search structure for '{search_id}'")
         return f'{{"query_string": {{"query": "{result}"}}}}' if is_elastic else result
 
     def _translate_dict(self, siem_name: str, search: dict) -> List[str]:
-        """Convert a search dict into SIEM conditions."""
         siem = self.definitions['siems'][siem_name]
         ops = siem['operators']
         windash_strategy = siem.get('windash_strategy', 'regex')
@@ -196,6 +188,9 @@ class UnifiedSIEMEngine:
                     logging.warning(f"SIEM '{siem_name}' does not support CIDR arrays; using first value {val[0]}")
                     val = val[0]
                 condition = ops['cidr'].format(field=mapped_field, value=val if cidr_array else f'"{val}"')
+            elif op == 'exists' and 'exists' in ops:
+                # Handle exists modifier with true/false value
+                condition = ops['exists'].format(field=mapped_field) if val.lower() == 'true' else f"NOT {ops['exists'].format(field=mapped_field)}"
             elif op not in ops:
                 logging.warning(f"Operator '{op}' not supported for '{siem_name}', defaulting to 'equals'")
                 condition = ops['equals'].format(field=mapped_field, value=val)
@@ -203,9 +198,9 @@ class UnifiedSIEMEngine:
                 sub = [ops[op].format(field=mapped_field, value=v) for v in val]
                 condition = siem['group_conditions']['all_of' if 'all' in modifiers else 'any_of'].format(conditions=' AND '.join(sub) if 'all' in modifiers else ' OR '.join(sub))
             elif op in {'lt', 'lte', 'gt', 'gte', 'minute', 'hour', 'day', 'week', 'month', 'year'} and op in ops:
-                condition = ops[op].format(field=mapped_field, value=val)  # Fixed: Use ops[op] instead of ops['op']
+                condition = ops[op].format(field=mapped_field, value=val)
             else:
-                condition = ops[op].format(field=mapped_field, value=val, flags=flags)  # Fixed: Use ops[op] instead of ops['op']
+                condition = ops[op].format(field=mapped_field, value=val, flags=flags)
             conditions.append(condition)
         return conditions
 
@@ -255,24 +250,20 @@ class UnifiedSIEMEngine:
             else:
                 parts.append(tokens[i])
             i += 1
-        # Join parts with spaces unless it's a top-level 'and' followed by 'not'
         if len(parts) > 2 and parts[-2] == 'AND' and parts[-1].startswith('NOT'):
             return ' '.join(parts[:-2]) + ' ' + parts[-1], i
         return siem_def.get('joiner_all_of', ' AND ').join(parts) if not is_elastic else f'"must": [{"".join(parts)}]', i
     
     def parse_condition(self, siem_name: str, condition: str, detection: dict) -> str:
-        """Parse Sigma condition into a SIEM query."""
         siem = self.definitions['siems'][siem_name]
         parsed, _ = self._parse_expr(condition.split(), siem_name, detection, siem)
         return f'{{"bool": {{{parsed}}}}}' if siem_name == "elasticsearch" else parsed
 
     def generate_time_filter(self, siem_name: str, time_range: str) -> str:
-        """Generate a time filter for the SIEM query."""
         siem = self.definitions['siems'][siem_name]['time_filter']
         return f"{siem['keyword']}{siem['format'].get(time_range, siem['format']['default'])}"
 
     def generate_query(self, siem_name: str, sigma_rule: dict) -> str:
-        """Generate a SIEM query from a Sigma rule."""
         self.siem_name = siem_name
         siem = self.definitions['siems'].get(siem_name, {})
         logsource = sigma_rule.get('logsource', {})
@@ -309,11 +300,9 @@ class UnifiedSIEMEngine:
             raise
 
     def generate_query_from_file(self, siem_name: str, path: str) -> str:
-        """Generate query from a Sigma rule file."""
         return self.generate_query(siem_name, self.load_yaml_file(path))
 
     def evaluate_field_condition(self, siem_name: str, field: str, value: Union[str, List], modifiers: List[str], event: dict) -> bool:
-        """Evaluate a field condition against an event."""
         mapped_field = self.map_field(siem_name, field)
         ev = event.get(mapped_field, event.get(field))
         val = value if isinstance(value, list) else str(value)
@@ -326,7 +315,7 @@ class UnifiedSIEMEngine:
             'startswith': lambda e, v: str(e).startswith(str(v)) if e is not None else False,
             'endswith': lambda e, v: str(e).endswith(str(v)) if e is not None else False,
             're': lambda e, v: bool(re.search(v, str(e), (re.I if 'i' in modifiers else 0) | (re.M if 'm' in modifiers else 0) | (re.S if 's' in modifiers else 0))) if e is not None else False,
-            'exists': lambda e, v: (e is not None) == (str(v).lower() in ('true', '1')),
+            'exists': lambda e, v: (e is not None) == (str(v).lower() == 'true'),  # Updated for exists
             'base64': lambda e, v: str(e) == base64.b64encode(str(v).encode('ascii')).decode('ascii') if e is not None else False,
             'base64offset': lambda e, v: any(str(e) == v.split('|')[i] for i in range(3)) if e is not None else False,
             'windash': lambda e, v: any(re.search(re.escape(d), str(e)) for d in str(v).split('|')) if e is not None else False,
@@ -351,7 +340,6 @@ class UnifiedSIEMEngine:
         return all(func(ev, v) for v in val) if isinstance(val, list) and 'all' in modifiers else any(func(ev, v) for v in val) if isinstance(val, list) else func(ev, val)
 
     def evaluate_search_identifier(self, siem_name: str, search: Union[dict, list, str], event: dict) -> bool:
-        """Evaluate a search identifier against an event."""
         if isinstance(search, dict):
             return all(self.evaluate_field_condition(siem_name, f.split('|')[0], v, f.split('|')[1:] if '|' in f else [], event) for f, v in search.items())
         elif isinstance(search, list):
@@ -361,7 +349,6 @@ class UnifiedSIEMEngine:
         return False
 
     def evaluate_detection(self, siem_name: str, detection: dict, event: dict) -> bool:
-        """Evaluate detection conditions against an event."""
         results = {k: self.evaluate_search_identifier(siem_name, v, event) for k, v in detection.items() if k != "condition"}
         cond = detection.get("condition", "")
         tokens = cond.split()
@@ -399,7 +386,6 @@ class UnifiedSIEMEngine:
             return False
 
     def test_rule(self, siem_name: str, sigma_rule: dict) -> None:
-        """Test a Sigma rule against its test log."""
         test_log = sigma_rule.get('test_log')
         if not test_log:
             print("No test_log provided in the rule.")
